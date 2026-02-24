@@ -9,6 +9,7 @@ let
   };
 
   inherit (builtins)
+    any
     attrNames
     listToAttrs
     mapAttrs
@@ -271,7 +272,18 @@ let
       # Computed options/inputs for each module in resolution
       args =
         mapAttrs (modulePath: module: {
-          inputs = mapAttrs (_: input: args.${input.path}.options) module.inputs;
+          inputs = mapAttrs (_: input:
+            args.${absModulePath modulePath input.path}.options
+          ) module.inputs;
+
+          # Map input names to the impl return value of the referenced module
+          results = mapAttrs (inputName: input:
+            let depPath = absModulePath modulePath input.path;
+            in if results ? ${depPath}
+               then results.${depPath}
+               else throw "Module '${depPath}' (input '${inputName}' of '${modulePath}') has no impl, so it has no result"
+          ) module.inputs;
+
           options = computeOptions {
             args = args.${modulePath};
             errorPrefix = "while computing ${modulePath} args";
@@ -318,6 +330,14 @@ let
         inputs = mapAttrs (
           _: input: (getModule root (absModulePath modulePath input.path)).args.options
         ) module.inputs;
+
+        results = mapAttrs (inputName: input:
+          let dep = getModule root (absModulePath modulePath input.path);
+          in if dep ? impl
+             then callFunction dep.impl dep.args
+             else throw "Module at input '${inputName}' of '${modulePath}' has no impl, so it has no result"
+        ) module.inputs;
+
         options = computeOptions {
           inherit args;
           errorPrefix = "while computing ${modulePath} args";
@@ -376,7 +396,7 @@ let
                     else
                       # Re-compute args fixpoint with passed args
                       {
-                        inherit (self.args) inputs;
+                        inherit (self.args) inputs results;
                         options = computeOptions {
                           inherit args;
                           inherit (module) options;
@@ -401,7 +421,7 @@ let
     {
       # Updated options
       options ? { },
-      # Whether to allow re-resolving
+      # Whether to allow re-resolvingq
       resolve ? true,
     }:
     optionsType.check options (
@@ -442,7 +462,11 @@ let
             operator =
               { key }:
               concatMap (
-                name: if resolution.${name}.inputs ? ${key} then [ { key = name; } ] else [ ]
+                name:
+                let mod = resolution.${name};
+                in if any (input: absModulePath name input.path == key) (attrValues mod.inputs)
+                   then [ { key = name; } ]
+                   else [ ]
               ) resolutionNames;
           });
 
